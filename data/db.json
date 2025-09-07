@@ -1,0 +1,41 @@
+{
+  "users": [
+    {
+      "id": "admin-1",
+      "username": "admin",
+      "name": "Administrador",
+      "email": "admin@example.com",
+      "role": "admin",
+      "password": "$2a$10$Wz2Afm1iJ3q1uapV.Y1PqOZt8mhOPnZl5qY6V0VbPPmLVtfQn7/7G",
+      "createdAt": "2025-09-07T00:00:00.000Z"
+    },
+    {
+      "id": "ag-1",
+      "username": "agent1",
+      "name": "Agente Uno",
+      "email": "agent1@example.com",
+      "role": "agent",
+      "password": "$2a$10$yMY5u4gCHo3p37Tq8oQKneL3qzMK8mCtv6fqpDpmD/6eZHRyLk0Y.",
+      "rate": 0.2,
+      "createdAt": "2025-09-07T00:00:00.000Z"
+    }
+  ],
+  "agents": [
+    {
+      "id": "ag-1",
+      "username": "agent1",
+      "name": "Agente Uno",
+      "email": "agent1@example.com",
+      "role": "agent",
+      "password": "$2a$10$yMY5u4gCHo3p37Tq8oQKneL3qzMK8mCtv6fqpDpmD/6eZHRyLk0Y.",
+      "rate": 0.2,
+      "createdAt": "2025-09-07T00:00:00.000Z"
+    }
+  ],
+  "players": [],
+  "transactions": [],
+  "bets": [],
+  "settings": {
+    "commissionBase": "GGR"
+  }
+}
