@@ -1,184 +1,173 @@
-// Express + SQLite + JWT + Bcrypt
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+import express from 'express';
+import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import morgan from 'morgan';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
+import url from 'url';
+
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+
+const DB_PATH = path.join(__dirname, 'data', 'db.json');
+function readDB() { return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8')); }
+function writeDB(db) { fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2)); }
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(morgan('dev'));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// --- DB ---
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'cayo.sqlite');
-const db = new sqlite3.Database(dbPath);
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
+const TOKEN_EXPIRES = '12h';
 
-db.serialize(()=>{
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    role TEXT NOT NULL DEFAULT 'player',
-    chips REAL NOT NULL DEFAULT 0,
-    deposits INTEGER NOT NULL DEFAULT 0
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS admins (
-    email TEXT PRIMARY KEY,
-    passhash TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'admin'
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS txs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    type TEXT NOT NULL, -- deposit/withdraw/adjust
-    amount REAL NOT NULL,
-    created_at INTEGER NOT NULL
-  )`);
-
-  // Seed admin if not exists
-  const email = process.env.ADMIN_EMAIL || 'admin@cayo.local';
-  const pass = process.env.ADMIN_PASSWORD || 'admin123';
-  const name = process.env.ADMIN_NAME || 'Admin';
-  db.get('SELECT email FROM admins WHERE email=?', [email], (err,row)=>{
-    if (!row){
-      const hash = bcrypt.hashSync(pass, 10);
-      db.run('INSERT INTO admins(email, passhash, name, role) VALUES(?,?,?,?)', [email, hash, name, 'admin']);
-      console.log('Seeded admin:', email);
-    }
-  });
-
-  // Seed wallet if missing
-  db.get('SELECT value FROM settings WHERE key=?', ['wallet'], (err,row)=>{
-    if (!row){
-      db.run('INSERT INTO settings(key,value) VALUES(?,?)', ['wallet', JSON.stringify({ amount: 2004 })]);
-    }
-  });
-
-  // Seed some users if empty
-  db.get('SELECT COUNT(*) as n FROM users', (err,row)=>{
-    if (row && row.n === 0){
-      const seed = [
-        ['Carloscayo1','player',1.40,2],
-        ['marpelu98','player',100.32,19],
-        ['louycayo','player',1.33,18],
-        ['Pepecayo','player',6.04,31],
-        ['maurocayo4','player',346.95,25],
-        ['Leon2228','player',1659.00,5],
-      ];
-      const stmt = db.prepare('INSERT INTO users(id,role,chips,deposits) VALUES(?,?,?,?)');
-      for(const s of seed) stmt.run(s);
-      stmt.finalize();
-    }
-  });
-});
-
-// --- Helpers ---
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-secret';
-function signToken(payload){ return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' }); }
-function auth(req,res,next){
-  const h = req.headers.authorization||'';
-  const t = h.startsWith('Bearer ') ? h.slice(7) : null;
-  if (!t) return res.status(401).send('No autorizado');
-  try{ req.user = jwt.verify(t, JWT_SECRET); next(); }
-  catch(e){ return res.status(401).send('Token inválido'); }
+function signToken(user){ return jwt.sign({ id:user.id, role:user.role, username:user.username }, JWT_SECRET, { expiresIn:TOKEN_EXPIRES }); }
+function authRequired(req,res,next){
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error:'No token' });
+  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
+  catch(e){ return res.status(401).json({ error:'Invalid token' }); }
 }
-function onlyAdmin(req,res,next){
-  if (req.user?.role !== 'admin') return res.status(403).send('Requiere rol admin');
-  next();
+function paginate(arr, page=1, perPage=20){
+  const total = arr.length; const pages = Math.ceil(total/perPage)||1;
+  const p = Math.min(Math.max(Number(page),1), pages);
+  const start = (p-1)*perPage;
+  return { data: arr.slice(start,start+perPage), page:p, perPage:Number(perPage), total, pages };
 }
 
-// --- Auth ---
-app.post('/auth/login', (req,res)=>{
-  const { email, password } = req.body||{};
-  if (!email || !password) return res.status(400).send('Faltan credenciales');
-  db.get('SELECT * FROM admins WHERE email=?', [email], (err,row)=>{
-    if (!row) return res.status(401).send('Credenciales inválidas');
-    const ok = bcrypt.compareSync(password, row.passhash);
-    if (!ok) return res.status(401).send('Credenciales inválidas');
-    const user = { email: row.email, name: row.name, role: row.role };
-    const accessToken = signToken(user);
-    res.json({ accessToken, user });
+// Seed if empty
+if (!fs.existsSync(DB_PATH)) {
+  const hashAdmin = bcrypt.hashSync('admin123', 10);
+  const hashAgent = bcrypt.hashSync('agent123', 10);
+  const now = new Date().toISOString();
+  const agents = [{ id:'ag-1', username:'agent1', name:'Agente Uno', email:'agent1@example.com', role:'agent', password:hashAgent, rate:0.2, createdAt:now }];
+  const users = [{ id:'admin-1', username:'admin', name:'Administrador', email:'admin@example.com', role:'admin', password:hashAdmin, createdAt:now }, ...agents];
+  function rand(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+  function pick(arr){ return arr[rand(0,arr.length-1)]; }
+  const names = ['Juan','Lucía','Diego','Sofía','Martín','Carla','Nicolás','Valentina','Pedro','Florencia','Mauro','Agustina'];
+  const last = ['Gómez','Pérez','Rodríguez','López','Sánchez','Romero','Suárez','Silva','Torres','Fernández'];
+  const levels = ['Bronce','Plata','Oro','Platino'];
+  const players = [];
+  for (let i=0;i<60;i++){
+    const name = `${pick(names)} ${pick(last)}`;
+    players.push({ id:'pl-'+uuidv4(), agentId:'ag-1', name, email:`p${i}@mail.com`, phone:`+598 9${rand(1000000,9999999)}`, level:pick(levels), balance:+(Math.random()*500).toFixed(2), createdAt:new Date(Date.now()-rand(1,300)*86400000).toISOString() });
+  }
+  const transactions = [];
+  for (let i=0;i<300;i++){
+    const p = pick(players);
+    const type = Math.random()>0.5?'deposit':'withdraw';
+    const status = Math.random()>0.85?'rejected':(Math.random()>0.2?'success':'pending');
+    const amount = +(Math.random()*400+20).toFixed(2);
+    transactions.push({ id:'tx-'+uuidv4(), playerId:p.id, agentId:p.agentId, type, status, amount, createdAt:new Date(Date.now()-rand(0,60)*86400000).toISOString() });
+  }
+  const sports = ['Fútbol','Tenis','Basket'];
+  const bets = [];
+  for (let i=0;i<500;i++){
+    const p = pick(players);
+    const stake = +(Math.random()*120+5).toFixed(2);
+    const odds = +(1.2 + Math.random()*3.5).toFixed(2);
+    const outcome = pick(['win','lose','open']);
+    const potential = +(stake*odds).toFixed(2);
+    const payout = outcome==='win'?potential:(outcome==='lose'?0:null);
+    bets.push({ id:'bt-'+uuidv4(), playerId:p.id, agentId:p.agentId, sport:pick(sports), stake, odds, outcome, payout, createdAt:new Date(Date.now()-rand(0,45)*86400000).toISOString() });
+  }
+  const db = { users, agents, players, transactions, bets, settings:{ commissionBase:'GGR' } };
+  fs.writeFileSync(DB_PATH, JSON.stringify(db,null,2));
+}
+
+app.post('/api/auth/login', (req,res)=>{
+  const { username, password } = req.body || {};
+  const db = readDB();
+  const user = db.users.find(u=>u.username===username);
+  if (!user) return res.status(401).json({ error:'Credenciales inválidas' });
+  if (!bcrypt.compareSync(password||'', user.password)) return res.status(401).json({ error:'Credenciales inválidas' });
+  const { password:_, ...profile } = user;
+  res.json({ token: signToken(user), profile });
+});
+
+app.get('/api/me', authRequired, (req,res)=>{
+  const db = readDB();
+  const me = db.users.find(u=>u.id===req.user.id);
+  if (!me) return res.status(404).json({ error:'Usuario no encontrado' });
+  const { password:_, ...profile } = me;
+  res.json({ profile });
+});
+
+app.get('/api/players', authRequired, (req,res)=>{
+  const { q='', agentId='', page=1, perPage=20 } = req.query;
+  const db = readDB();
+  let rows = db.players;
+  if (req.user.role==='agent') rows = rows.filter(p=> p.agentId==='ag-1' || p.agentId===req.user.id);
+  if (agentId) rows = rows.filter(p=> p.agentId===agentId);
+  if (q){ const s=String(q).toLowerCase(); rows = rows.filter(r=> Object.values(r).join(' ').toLowerCase().includes(s)); }
+  res.json(paginate(rows, page, perPage));
+});
+
+app.post('/api/players', authRequired, (req,res)=>{
+  const { name, email, phone, level='Bronce', agentId } = req.body || {};
+  const db = readDB();
+  const aid = req.user.role==='agent' ? (req.user.id || 'ag-1') : (agentId || 'ag-1');
+  const player = { id:'pl-'+uuidv4(), agentId: aid, name, email, phone, level, balance:0, createdAt:new Date().toISOString() };
+  db.players.push(player); writeDB(db);
+  res.json({ player });
+});
+
+app.get('/api/transactions', authRequired, (req,res)=>{
+  const { type='', status='', q='', agentId='', page=1, perPage=20 } = req.query;
+  const db = readDB();
+  let rows = db.transactions;
+  if (req.user.role==='agent') rows = rows.filter(t=> t.agentId==='ag-1' || t.agentId===req.user.id);
+  if (agentId) rows = rows.filter(t=> t.agentId===agentId);
+  if (type) rows = rows.filter(t=> t.type===type);
+  if (status) rows = rows.filter(t=> t.status===status);
+  if (q){ const s=String(q).toLowerCase(); rows = rows.filter(r=> Object.values(r).join(' ').toLowerCase().includes(s)); }
+  res.json(paginate(rows, page, perPage));
+});
+
+app.get('/api/bets', authRequired, (req,res)=>{
+  const { sport='', outcome='', agentId='', page=1, perPage=20 } = req.query;
+  const db = readDB();
+  let rows = db.bets;
+  if (req.user.role==='agent') rows = rows.filter(b=> b.agentId==='ag-1' || b.agentId===req.user.id);
+  if (agentId) rows = rows.filter(b=> b.agentId===agentId);
+  if (sport) rows = rows.filter(b=> b.sport===sport);
+  if (outcome) rows = rows.filter(b=> b.outcome===outcome);
+  res.json(paginate(rows, page, perPage));
+});
+
+app.get('/api/reports/kpi', authRequired, (req,res)=>{
+  const db = readDB();
+  const scopeAgent = req.user.role==='agent' ? (req.user.id || 'ag-1') : null;
+  const players = db.players.filter(p=> !scopeAgent || p.agentId===scopeAgent);
+  const tx = db.transactions.filter(t=> !scopeAgent || t.agentId===scopeAgent);
+  const bets = db.bets.filter(b=> !scopeAgent || b.agentId===scopeAgent);
+  const deposits = tx.filter(t=> t.type==='deposit' && t.status==='success').reduce((a,b)=>a+b.amount,0);
+  const withdraws = tx.filter(t=> t.type==='withdraw' && t.status==='success').reduce((a,b)=>a+b.amount,0);
+  const actives = new Set(bets.filter(b=> (Date.now()-new Date(b.createdAt).getTime()) < 30*86400000 ).map(b=> b.playerId)).size;
+  res.json({ players:players.length, deposits:+deposits.toFixed(2), withdraws:+withdraws.toFixed(2), activePlayers30d:actives });
+});
+
+app.get('/api/reports/commission', authRequired, (req,res)=>{
+  const { from='', to='', agentId='' } = req.query;
+  const db = readDB();
+  const start = from ? new Date(from) : new Date(Date.now()-30*86400000);
+  const end = to ? new Date(to) : new Date();
+  const aid = req.user.role==='agent' ? (req.user.id || 'ag-1') : (agentId || 'ag-1');
+  const agent = db.agents.find(a=> a.id===aid) || { rate:0.2 };
+  const bets = db.bets.filter(b=> b.agentId===aid).filter(b=> {
+    const d = new Date(b.createdAt); return d>=start && d<=end;
   });
+  const stakes = bets.reduce((a,b)=>a+b.stake,0);
+  const payouts = bets.reduce((a,b)=>a+(b.payout||0),0);
+  const ggr = stakes - payouts;
+  const commission = ggr * (agent.rate || 0.2);
+  res.json({ agentId:aid, base:'GGR', rate:agent.rate||0.2, from:start.toISOString(), to:end.toISOString(), stakes:+stakes.toFixed(2), payouts:+payouts.toFixed(2), ggr:+ggr.toFixed(2), commission:+commission.toFixed(2) });
 });
 
-app.get('/auth/me', auth, (req,res)=>{
-  res.json(req.user);
-});
+app.get('*', (req,res)=> res.sendFile(path.join(__dirname, 'public', 'index.html')) );
 
-// --- Stats ---
-app.get('/stats/wallet', auth, (req,res)=>{
-  db.get('SELECT value FROM settings WHERE key=?', ['wallet'], (err,row)=>{
-    const val = row ? JSON.parse(row.value) : { amount: 0 };
-    res.json(val);
-  });
-});
-
-// --- Users ---
-app.get('/users', auth, (req,res)=>{
-  const q = (req.query.q||'').toLowerCase();
-  const role = req.query.role||'';
-  const page = Number(req.query.page||1);
-  const pageSize = Number(req.query.pageSize||10);
-  const where = [];
-  const params = [];
-  if (q){ where.push('LOWER(id) LIKE ?'); params.push('%'+q+'%'); }
-  if (role){ where.push('role = ?'); params.push(role); }
-  const whereSql = where.length ? ('WHERE '+where.join(' AND ')) : '';
-  db.get('SELECT COUNT(*) as total FROM users '+whereSql, params, (err, meta)=>{
-    db.all('SELECT * FROM users '+whereSql+' ORDER BY id LIMIT ? OFFSET ?', params.concat([pageSize, (page-1)*pageSize]), (err2, rows)=>{
-      res.json({ rows, total: meta.total, page, pageSize });
-    });
-  });
-});
-
-app.post('/users', auth, onlyAdmin, (req,res)=>{
-  const { id, role='player' } = req.body||{};
-  if (!id) return res.status(400).send('ID requerido');
-  db.run('INSERT INTO users(id, role, chips, deposits) VALUES(?,?,0,0)', [id, role], function(err){
-    if (err) return res.status(409).send('ID duplicado');
-    db.get('SELECT * FROM users WHERE id=?', [id], (e,row)=> res.json(row));
-  });
-});
-
-app.patch('/users/:id', auth, (req,res)=>{
-  const { id } = req.params;
-  const { role, chips, deposits } = req.body||{};
-  db.get('SELECT * FROM users WHERE id=?', [id], (err,row)=>{
-    if (!row) return res.status(404).send('No existe');
-    const newRole = role ?? row.role;
-    const newChips = typeof chips==='number' ? chips : row.chips;
-    const newDeps = typeof deposits==='number' ? deposits : row.deposits;
-    db.run('UPDATE users SET role=?, chips=?, deposits=? WHERE id=?', [newRole, newChips, newDeps, id], function(e){
-      db.get('SELECT * FROM users WHERE id=?', [id], (e2,row2)=> res.json(row2));
-    });
-  });
-});
-
-app.post('/users/:id/deposits', auth, (req,res)=>{
-  const { id } = req.params;
-  const amount = Number(req.body?.amount||0);
-  if (!(amount>0)) return res.status(400).send('Monto inválido');
-  db.get('SELECT * FROM users WHERE id=?', [id], (err,row)=>{
-    if (!row) return res.status(404).send('No existe');
-    const chips = +(row.chips + amount).toFixed(2);
-    const deposits = row.deposits + 1;
-    db.run('UPDATE users SET chips=?, deposits=? WHERE id=?', [chips, deposits, id]);
-    // tx
-    db.run('INSERT INTO txs(user_id, type, amount, created_at) VALUES(?,?,?,?)', [id, 'deposit', amount, Date.now()]);
-    // wallet
-    db.get('SELECT value FROM settings WHERE key=?', ['wallet'], (e,r)=>{
-      const v = r ? JSON.parse(r.value) : { amount: 0 };
-      v.amount = +(v.amount + amount);
-      db.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', ['wallet', JSON.stringify(v)]);
-      res.json({ ok:true, user:{ id, role: row.role, chips, deposits }, wallet: v });
-    });
-  });
-});
-
-const port = process.env.PORT || 4000;
-app.listen(port, ()=> console.log('API en http://localhost:'+port));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, ()=> console.log('Agent Panel Pro on http://localhost:'+PORT) );
